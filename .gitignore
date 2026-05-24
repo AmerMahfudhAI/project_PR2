@@ -1,0 +1,11 @@
+venv/
+.venv/
+env/
+__pycache__/
+*.pyc
+
+.env
+
+
+data/*_vectors.npy
+.pytest_cache/data/*.csv
