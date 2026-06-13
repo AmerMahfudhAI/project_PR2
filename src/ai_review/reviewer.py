@@ -1,117 +1,96 @@
 import os
 from dotenv import load_dotenv
-from langchain_groq import ChatGroq
-from langchain_core.messages import HumanMessage, AIMessage
-from src.ai_review.models import StructuredResumeResponse, JobMatchResultSchema
+from langchain_google_genai import ChatGoogleGenerativeAI
+from src.ai_review.models import StructuredResumeResponse
 
-# Load environment variables securely from .env file
 load_dotenv()
 
 class AIResumeReviewer:
     def __init__(self):
-        """
-        Initializes the LangChain ChatGroq LLM instance using Llama 3.3.
-        Sets up structured chains and conversational configuration.
-        """
-        self.api_key = os.getenv("GROQ_API_KEY")
-        if not self.api_key:
-            raise ValueError("GROQ_API_KEY is not configured in the environment variables.")
-        
-        # Initialize the high-performance Llama 3.3 model via LangChain
-        self.llm = ChatGroq(
-            groq_api_key=self.api_key,
-            model_name="llama-3.3-70b-versatile",
-            temperature=0.1  # Low temperature ensures factual and reliable extraction
+        """Initializes the Gemini model using LangChain framework with high stability settings."""
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            raise ValueError("GEMINI_API_KEY is not set in the environment variables.")
+            
+        # إضافة إعدادات الاستقرار لتفادي الفصل المفاجئ:
+        # max_retries=3 تعني إذا فصل السيرفر سيعيد المحاولة حتى 3 مرات تلقائياً قبل إعطاء خطأ
+        # timeout=60 يمنح السيرفر دقيقة كاملة لمعالجة الملفات الكبيرة
+        self.llm = ChatGoogleGenerativeAI(
+            model="gemini-2.5-flash",
+            google_api_key=api_key,
+            temperature=0.2,
+            max_retries=3,
+            timeout=60
         )
+        
+        self.structured_llm = self.llm.with_structured_output(StructuredResumeResponse)
 
-        # Create structured runnable chains that enforce the Pydantic schemas
-        self.resume_analyzer_chain = self.llm.with_structured_output(StructuredResumeResponse)
-        self.job_matcher_chain = self.llm.with_structured_output(JobMatchResultSchema)
-
-    def get_review(self, resume_text: str) -> dict:
+    def get_review(self, resume_text: str) -> StructuredResumeResponse:
         """
-        Analyzes the raw resume text using LangChain and extracts structured information.
+        [الفكرة الأولى والثانية] تحليل نص السيرة الذاتية عبر LangChain واستخراج 
+        البيانات كاملة مع الـ ATS Score بأعلى دقة وبأي لغة مع مقاومة انقطاع السيرفر.
         """
-        if not resume_text or not resume_text.strip():
-            return {"error": "Provided resume text is completely empty."}
-
         prompt = f"""
-        You are an expert AI Resume Analyzer and ATS Optimization specialist.
-        Your task is to parse the raw resume text provided below and extract all relevant information into the requested structured format.
+        You are an expert ATS (Applicant Tracking System) and professional recruiter.
+        Analyze the following resume text carefully, regardless of its language (Arabic, English, etc.).
         
-        CRITICAL LANGUAGE RULE: 
-        1. Automatically detect the primary language of the resume text.
-        2. Provide the 'ai_overall_evaluation' field in the SAME detected language.
+        Extract all relevant details matching the schema provided.
+        Critically evaluate the resume to compute an accurate 'ats_score' (from 0 to 100) based on industry standards, formatting, language clarity, and structure.
         
-        Resume Content to Analyze:
-        -------------------------
-        {resume_text[:4000]}
-        -------------------------
+        Resume text to analyze:
+        \"\"\"{resume_text}\"\"\"
         """
         try:
-            structured_data = self.resume_analyzer_chain.invoke(prompt)
-            return structured_data.model_dump()
+            response = self.structured_llm.invoke(prompt)
+            return response
         except Exception as e:
-            return {"error": f"LangChain Analysis Error: {str(e)}"}
-
-    def match_resume_to_job(self, resume_text: str, job_description: str) -> dict:
+            return {"error": f"Failed to analyze resume via LangChain: {str(e)}"}
+    
+    def extract_skills_from_job_description(self, job_description: str) -> list:
         """
-        Compares a candidate's resume text against a specific job description.
+        [الفكرة الثالثة] قراءة وصف الوظيفة واستخراج المهارات الأساسية والتقنية
+        المطلوبة منها على شكل قائمة (List) نظيفة لتسهيل عملية المقارنة.
         """
-        if not resume_text or not job_description:
-            return {"error": "Both resume text and job description are required for matching."}
-
         prompt = f"""
-        You are an advanced corporate Recruiter AI. Compare the given Resume text with the Job Description (JD).
-        Evaluate the alignment based on industry standards, utilizing these specific weights:
-        - Skills Alignment: 60%
-        - Professional Experience: 30%
-        - Educational Background: 10%
-
-        LANGUAGE RULE: Write the textual 'explanation' in the same language as the provided Resume.
-
-        Job Description (JD):
-        {job_description}
-
-        Candidate Resume:
-        {resume_text[:3000]}
-        """
-        try:
-            match_result = self.job_matcher_chain.invoke(prompt)
-            return match_result.model_dump()
-        except Exception as e:
-            return {"error": f"LangChain Matching Error: {str(e)}"}
-
-    def resume_coach_chat(self, user_message: str, chat_history_list: list) -> str:
-        """
-        AI Resume Coach that manages conversational history using LangChain message structures.
-        Guides the user on how to improve, update, and fix their CV interactively.
-        """
-        # Convert stored flat list database dicts into actual LangChain Message Objects
-        formatted_messages = []
-        for msg in chat_history_list:
-            if msg["role"] == "user":
-                formatted_messages.append(HumanMessage(content=msg["content"]))
-            elif msg["role"] == "assistant":
-                formatted_messages.append(AIMessage(content=msg["content"]))
-
-        # Append the latest user prompt message at the end of the conversation history
-        formatted_messages.append(HumanMessage(content=user_message))
-
-        # System instructions given dynamically within the conversation context
-        system_instructions = """
-        You are an expert Career Coach AI. Your job is to help the user optimize their resume, guide them through website updates, and provide actionable tips to increase their ATS score.
-        - Analyze any changes they claim to make on their profile.
-        - Be professional, encouraging, and clear.
-        - Respond in the same language used by the user.
-        """
+        You are an expert technical recruiter. Analyze the following Job Description and extract a clean list of required core skills and technologies.
+        Return ONLY a JSON array of strings containing the skills. Do not include any explanation or markdown formatting.
         
-        # Insert the system instructions prefix smoothly
-        messages_with_system = [HumanMessage(content=system_instructions)] + formatted_messages
-
+        Job Description:
+        \"\"\"{job_description}\"\"\"
+        """
         try:
-            # Invoke the full conversational chain maintaining strict contextual awareness
-            response = self.llm.invoke(messages_with_system)
-            return response.content
+            # نستخدم الموديل الأساسي لاستخراج مصفوفة نصوص مباشرة
+            response = self.llm.invoke(prompt)
+            # تنظيف الخرج وتحويله إلى قائمة بايثون بأمان
+            content = response.content.strip()
+            if content.startswith("```json"):
+                content = content.replace("```json", "").replace("```", "").strip()
+            elif content.startswith("```"):
+                content = content.replace("```", "").strip()
+                
+            import json
+            skills = json.loads(content)
+            return [s.lower().strip() for s in skills if isinstance(s, str)]
+        except Exception:
+            # في حال حدوث أي خطأ، نرجع قائمة فارغة لضمان عدم توقف السيرفر
+            return []
+    def generate_coach_response(self, user_message: str, resume_context: str) -> str:
+        """
+        [الفكرة الرابعة] توليد رد ذكي من الـ AI كـ Career Coach بناءً على 
+        رسالة المستخدم الحالية وبيانات سيرته الذاتية المخزنة.
+        """
+        prompt = f"""
+        You are an expert Career Coach and IT Recruiter. Your job is to guide the candidate, help them improve their resume, give interview tips, and suggest skills to learn.
+        
+        Candidate's Resume Context (Use this to customize your tips):
+        \"\"\"{resume_context}\"\"\"
+        
+        User Message: "{user_message}"
+        
+        Respond kindly, professionally, and directly in the same language used by the user (Arabic or English). Keep your advice actionable and concise. Do not use any markdown code blocks or system logs.
+        """
+        try:
+            response = self.llm.invoke(prompt)
+            return response.content.strip()
         except Exception as e:
-            return f"Error generation chat advice: {str(e)}"
+            return f"عذراً، واجهت مشكلة في الاتصال بالمستشار الذكي: {str(e)}"

@@ -1,10 +1,10 @@
 import os
 import docx2txt
-from pypdf import PdfReader  # تم التحديث هنا لاستخدام المكتبة الجديدة بدلاً من PyPDF2
+from pypdf import PdfReader
 
 def get_document_text(file_path: str) -> str:
     """
-    Extracts text from PDF and DOCX files safely.
+    Extracts text from PDF and DOCX files safely without printing logs.
     """
     if not os.path.exists(file_path):
         return ""
@@ -21,7 +21,7 @@ def get_document_text(file_path: str) -> str:
                     text += page_text + "\n"
         elif ext in [".docx", ".doc"]:
             text = docx2txt.process(file_path)
-    except Exception as e:
-        print(f"Error parsing document {file_path}: {str(e)}")
+    except Exception:
+        pass
         
     return text.strip()
