@@ -11,3 +11,4 @@ pypdf
 docx2txt
 groq
 langchain-groq
+python-multipart
