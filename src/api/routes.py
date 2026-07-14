@@ -1,59 +1,52 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException
 import os
 import shutil
-
 from src.parser.document_parser import get_document_text as extract_text
 from src.ai_review.reviewer import AIResumeReviewer
 from src.database.connection import MongoDBConnection
+from fastapi import APIRouter, Form, HTTPException
+
+
+
 
 router = APIRouter()
 reviewer = AIResumeReviewer()
 db_conn = MongoDBConnection()
 
 @router.post("/analyze-resume")
-async def analyze_resume(file: UploadFile = File(...)):
+async def analyze_resume(file_url: str = Form(...)):
     """
-    [الفكرة الأولى] استقبال ملف السيرة الذاتية فقط، تحليله عبر LangChain،
-    استخراج الـ ATS Score، وحفظ البيانات تلقائياً في MongoDB Atlas مع معالجة الـ ObjectId.
+    [الفكرة الأولى] استقبال رابط السيرة الذاتية (Cloudinary URL)، تحليله عبر LangChain،
+    واستخراج البيانات كاملة وحفظها تلقائياً في MongoDB Atlas.
     """
-    temp_path = f"temp_{file.filename}"
-    with open(temp_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-
     try:
-        # 1. استخراج النص من الملف
-        text = extract_text(temp_path)
+        # 1. تحميل واستخراج النص مباشرة من الرابط
+        text = extract_text(file_url)
         if not text or text.strip() == "":
-            raise HTTPException(status_code=422, detail="Could not extract any valid text from the document.")
+            raise HTTPException(status_code=422, detail="Could not extract any valid text from the provided file URL.")
             
         # 2. التحليل بواسطة الـ AI (LangChain)
         ai_response = reviewer.get_review(text)
-        
         if isinstance(ai_response, dict) and "error" in ai_response:
             raise HTTPException(status_code=502, detail=ai_response["error"])
 
         # 3. تحويل كائن Pydantic الناتج إلى قاموس بايثون
-        resume_data = (
-            ai_response.dict() 
-            if hasattr(ai_response, "dict") 
-            else dict(ai_response)
-        )
+        resume_data = ai_response.dict() if hasattr(ai_response, "dict") else dict(ai_response)
 
-        # 4. الحفظ في كولكشن resumes
+        # 4. الحفظ في كولكشن resumes مع حفظ رابط الـ Cloudinary للتوثيق
+        resume_data["cloudinary_url"] = file_url
         resumes_collection = db_conn.get_collection("resumes")
         inserted_result = resumes_collection.insert_one(resume_data)
         generated_id = str(inserted_result.inserted_id)
 
-        # ⚙️ الحل السحري: تحويل الـ ObjectId الخاص بالمونغو داخل القاموس إلى نص عادي كي يقبله FastAPI
+        # تحويل الـ ObjectId الخاص بالمونغو داخل القاموس إلى نص عادي
         if "_id" in resume_data:
             resume_data["_id"] = str(resume_data["_id"])
 
-        # 5. النتيجة النهائية الصافية بدون طباعة في التيرمنال
         return {
             "status": "success",
             "message": "Resume successfully analyzed via LangChain and saved to MongoDB Atlas.",
             "resume_id": generated_id,
-            "filename": file.filename,
+            "cloudinary_url": file_url,
             "analysis": resume_data
         }
         
@@ -61,50 +54,38 @@ async def analyze_resume(file: UploadFile = File(...)):
         if isinstance(e, HTTPException):
             raise e
         raise HTTPException(status_code=500, detail="An error occurred during resume analysis processing")
-        
-    finally:
-        if os.path.exists(temp_path): 
-            os.remove(temp_path)
-
 
 @router.post("/match-resume-to-database-jobs")
-async def match_resume_to_database_jobs(file: UploadFile = File(...)):
+async def match_resume_to_database_jobs(file_url: str = Form(...)):
     """
-    [الفكرة الثانية] يرفع المستخدم ملف السي في الخاص به فقط، ليتلقى قائمة 
-    بالوظائف المتاحة بقاعدة البيانات مرتبة تنازلياً حسب نسبة التوافق ونسبة الـ ATS.
+    [الفكرة الثانية] يرسل المستخدم رابط السي في (Cloudinary URL)، ليتلقى قائمة 
+    بالوظائف المتاحة بقاعدة البيانات مرتبة تنازلياً حسب نسبة التوافق.
     """
-    temp_path = f"match_db_{file.filename}"
-    with open(temp_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-
     try:
-        # 1. استخراج النص من السي في المرفوع
-        text = extract_text(temp_path)
+        # 1. استخراج النص من الرابط
+        text = extract_text(file_url)
         if not text or text.strip() == "":
-            raise HTTPException(status_code=422, detail="Could not extract any valid text from the document.")
+            raise HTTPException(status_code=422, detail="Could not extract any valid text from the provided file URL.")
             
-        # 2. تحليل السي في عبر الـ AI لاستخراج مهارات المستخدم الحالي والـ ATS Score الخاص به
+        # 2. تحليل السي في عبر الـ AI واستخراج مهارات المستخدم والـ ATS Score
         ai_response = reviewer.get_review(text)
         if isinstance(ai_response, dict) and "error" in ai_response:
             raise HTTPException(status_code=502, detail=ai_response["error"])
 
         resume_data = ai_response.dict() if hasattr(ai_response, "dict") else dict(ai_response)
         
-        # استخراج مهارات المستخدم وتحويلها لـ لور كيس للمقارنة الدقيقة
         candidate_skills = [s.lower().strip() for s in resume_data.get("skills", [])]
-        candidate_ats = resume_data.get("ats_score", 50) # الـ ATS الأساسي للمرشح
+        candidate_ats = resume_data.get("ats_score", 50)
 
-        # 3. جلب جميع الوظائف المتاحة من كولكشن job_posts في المونغو
+        # 3. جلب جميع الوظائف المتاحة من كولكشن job_posts
         jobs_collection = db_conn.get_collection("job_posts")
         all_jobs = list(jobs_collection.find())
         
         matched_results = []
         
-        # 4. حساب نسب التطابق برمجياً لكل وظيفة
+        # 4. حساب نسب التطابق برمجياً
         for job in all_jobs:
             job_skills = [s.lower().strip() for s in job.get("skills", [])]
-            
-            # تقاطع المهارات (المهارات المشتركة بين السي في والوظيفة)
             intersected_skills = set(candidate_skills).intersection(set(job_skills))
             matched_skills_count = len(intersected_skills)
             
@@ -113,11 +94,8 @@ async def match_resume_to_database_jobs(file: UploadFile = File(...)):
             if total_job_skills > 0:
                 match_percentage = int((matched_skills_count / total_job_skills) * 100)
             
-            # حساب نسبة الـ ATS الخاصة بالوظيفة بناءً على وزن المهارات والـ ATS الأساسي للسي في
-            # معادلة ذكية تدمج قوة السي في مع نسبة المهارات المطلوبة للوظيفة
             job_ats_compatibility = int((match_percentage * 0.6) + (candidate_ats * 0.4))
             
-            # بناء كائن الوظيفة النظيف بالتسميات المطلوبة
             job_item = {
                 "job_id": str(job.get("_id")),
                 "title": job.get("title", "Untitled Position"),
@@ -129,7 +107,6 @@ async def match_resume_to_database_jobs(file: UploadFile = File(...)):
             }
             matched_results.append(job_item)
             
-        # 5. ترتيب الوظائف تنازلياً من الأعلى توافقاً إلى الأقل
         matched_results.sort(key=lambda x: int(x["match_percentage"].replace("%", "")), reverse=True)
         
         return {
@@ -142,11 +119,6 @@ async def match_resume_to_database_jobs(file: UploadFile = File(...)):
         if isinstance(e, HTTPException):
             raise e
         raise HTTPException(status_code=500, detail="An error occurred during database job matching processing")
-        
-    finally:
-        if os.path.exists(temp_path): 
-            os.remove(temp_path)
-
 
 from fastapi import Form # تأكد من وجود Form في أعلى الملف مع الاستيرادات
 
