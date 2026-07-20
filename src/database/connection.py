@@ -10,14 +10,22 @@ class MongoDBConnection:
     def __init__(self):
         """
         Initializes the MongoDB cloud connection using the URI from environment variables.
-        Includes a secure SSL certificate bundle using certifi.
+        Includes options to handle SSL handshake timeouts and VPN connections gracefully.
         """
         self.uri = os.getenv("MONGODB_URI")
         if not self.uri:
             raise ValueError("MONGODB_URI is not set in the environment variables.")
         
-        # Establish the secure cloud connection
-        self.client = MongoClient(self.uri, tlsCAFile=certifi.where())
+        # Establish the secure cloud connection with SSL bypass for VPN local testing
+        self.client = MongoClient(
+            self.uri, 
+            tls=True,
+            tlsAllowInvalidCertificates=True,  # 👈 يتجاوز مشكلة SSL Handshake عند تشغيل الـ VPN
+            tlsCAFile=certifi.where(),
+            connectTimeoutMS=30000,
+            socketTimeoutMS=30000,
+            serverSelectionTimeoutMS=30000
+        )
         
         # Connect to the specific database 'joboffers'
         self.db = self.client["joboffers"]

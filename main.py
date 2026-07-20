@@ -4,7 +4,8 @@ import logging
 from typing import List
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
-
+import uuid
+from typing import List, Optional
 # Import our production-ready custom modules
 from src.parser.document_parser import get_document_text
 from src.ai_review.reviewer import AIResumeReviewer
@@ -138,28 +139,81 @@ async def match_job_to_candidates(job_description: str = Form(...), limit: int =
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
-
 @app.post("/resume-coach-chat", status_code=status.HTTP_200_OK)
-async def resume_coach_chat(user_id: str = Form(...), message: str = Form(...)):
+async def resume_coach_chat(
+    user_id: str = Form(...), 
+    message: str = Form(...),
+    session_id: Optional[str] = Form(None)
+):
     """
-    [AI COACH] Conversational interview assistant. Fetches chat logs from cloud history, 
-    generates contextual advice on resume updates, and updates the session history safely.
+    [AI COACH] Conversational interview assistant supporting User Isolation and Multiple Sessions.
+    - If session_id is None or empty, a new chat session will be automatically generated.
+    - Isolates conversation memory per session for each specific user.
     """
     try:
-        # 1. Fetch persistent chat logs from cloud history to keep conversation memory context
-        history = db_searcher.get_chat_history(user_id=user_id)
+        clean_user_id = user_id.strip().lower()
         
-        # 2. Invoke conversational Llama 3.3 chain maintaining full behavioral awareness
+        # 1. إذا لم يرسل الفرونت إند session_id، ننشئ جلسة جديدة فريدة
+        if not session_id or session_id.strip() == "":
+            session_id = str(uuid.uuid4())
+            # عنوان الجلسة ينشأ تلقائياً من أول 30 حرف من الرسالة الأولى
+            session_title = message[:30] + "..." if len(message) > 30 else message
+            db_searcher.create_chat_session(user_id=clean_user_id, session_id=session_id, title=session_title)
+        else:
+            # تحديث وقت آخر تفاعل مع الجلسة
+            db_searcher.update_session_timestamp(session_id=session_id)
+
+        # 2. استرجاع السجل التاريخي للمحادثات الخاص بهذه الجلسة وبهذا المستخدم تحديداً
+        history = db_searcher.get_chat_history(user_id=clean_user_id, session_id=session_id)
+        
+        # 3. استدعاء نموذج الذكاء الاصطناعي لتوليد الرد بناءً على سياق الجلسة الحالية
         ai_advice = ai_reviewer.resume_coach_chat(user_message=message, chat_history_list=history)
         
-        # 3. Synchronize history logs back to MongoDB Atlas (Save both user message and AI response)
-        db_searcher.save_chat_message(user_id=user_id, role="user", message=message)
-        db_searcher.save_chat_message(user_id=user_id, role="assistant", message=ai_advice)
+        # 4. حفظ الرسائل مع الـ session_id والـ user_id في MongoDB
+        db_searcher.save_chat_message(user_id=clean_user_id, session_id=session_id, role="user", message=message)
+        db_searcher.save_chat_message(user_id=clean_user_id, session_id=session_id, role="assistant", message=ai_advice)
         
         return {
             "status": "success",
-            "user_id": user_id,
+            "user_id": clean_user_id,
+            "session_id": session_id,
             "response": ai_advice
+        }
+    except Exception as e:
+        logger.error(f"Error in resume_coach_chat: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+    
+
+@app.get("/users/{user_id}/sessions", status_code=status.HTTP_200_OK)
+async def get_user_chat_sessions(user_id: str):
+    """
+    [FOR FRONTEND] Fetches all chat sessions (sidebar history) for a specific user.
+    """
+    try:
+        clean_user_id = user_id.strip().lower()
+        sessions = db_searcher.get_user_sessions(user_id=clean_user_id)
+        return {
+            "status": "success",
+            "user_id": clean_user_id,
+            "sessions_count": len(sessions),
+            "sessions": sessions
+        }
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+
+@app.get("/sessions/{session_id}/messages", status_code=status.HTTP_200_OK)
+async def get_session_messages(session_id: str):
+    """
+    [FOR FRONTEND] Loads all historical messages when user clicks on a specific chat session.
+    """
+    try:
+        messages = db_searcher.get_session_messages(session_id=session_id)
+        return {
+            "status": "success",
+            "session_id": session_id,
+            "messages_count": len(messages),
+            "messages": messages
         }
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
